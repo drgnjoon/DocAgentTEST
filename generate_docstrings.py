@@ -408,6 +408,23 @@ def main():
         action='store_true',
         help='Overwrite existing docstrings instead of skipping them (default: False)'
     )
+    parser.add_argument(
+        '--visual-details',
+        action='store_true',
+        help='Show dependency tree details in the agent status view'
+    )
+    parser.add_argument(
+        '--visual-tree-depth',
+        type=int,
+        default=2,
+        help='Max dependency depth to render in the tree view (default: 2)'
+    )
+    parser.add_argument(
+        '--visual-tree-limit',
+        type=int,
+        default=30,
+        help='Max dependency nodes to render in the tree view (default: 30)'
+    )
     
     args = parser.parse_args()
     repo_path = args.repo_path
@@ -434,7 +451,19 @@ def main():
         logger.info(f"Initializing orchestrator with config: {config_path}")
         # Pass the test_mode to the orchestrator if it's "context_print"
         orchestrator_test_mode = test_mode if test_mode != 'none' else None
-        orchestrator = Orchestrator(repo_path=repo_path, config_path=config_path, test_mode=orchestrator_test_mode)
+        visual_options = None
+        if args.visual_details:
+            visual_options = {
+                "show_dependency_tree": True,
+                "max_tree_depth": args.visual_tree_depth,
+                "max_tree_nodes": args.visual_tree_limit
+            }
+        orchestrator = Orchestrator(
+            repo_path=repo_path,
+            config_path=config_path,
+            test_mode=orchestrator_test_mode,
+            visual_options=visual_options
+        )
         
         # Check if the overwrite_docstrings option is in the config file
         # If it's there, it overrides the command-line argument
@@ -546,6 +575,8 @@ def main():
         
         # Generate the docstring
         logger.info(f"Generating docstring for {component_id}")
+        if orchestrator and hasattr(orchestrator.visualizer, "set_dependency_context"):
+            orchestrator.visualizer.set_dependency_context(component_id, components)
         docstring = generate_docstring_for_component(component, orchestrator, test_mode, dependency_graph)
         
         # Update the file with the new docstring

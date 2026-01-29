@@ -16,11 +16,19 @@ import tiktoken
 class DummyVisualizer:
     """A no-op visualizer that implements the same interface as StatusVisualizer but does nothing."""
     
+    def __init__(self, *args, **kwargs):
+        """Do nothing."""
+        pass
+
     def reset(self):
         """Do nothing."""
         pass
     
     def set_current_component(self, component, file_path):
+        """Do nothing."""
+        pass
+
+    def set_dependency_context(self, component_id, components):
         """Do nothing."""
         pass
     
@@ -31,13 +39,20 @@ class DummyVisualizer:
 class Orchestrator(BaseAgent):
     """Agent responsible for managing the workflow between all other agents."""
     
-    def __init__(self, repo_path: str, config_path: Optional[str] = None, test_mode: Optional[str] = None):
+    def __init__(
+        self,
+        repo_path: str,
+        config_path: Optional[str] = None,
+        test_mode: Optional[str] = None,
+        visual_options: Optional[Dict[str, Any]] = None
+    ):
         """Initialize the Orchestrator agent and its sub-agents.
         
         Args:
             repo_path: Path to the repository being analyzed
             config_path: Optional path to the configuration file
             test_mode: Optional test mode to run only specific components. Values: "reader_searcher", "context_print" or None
+            visual_options: Optional settings for the status visualizer
         """
         super().__init__("Orchestrator")
         self.repo_path = repo_path
@@ -68,7 +83,8 @@ class Orchestrator(BaseAgent):
         if test_mode == "context_print":
             self.visualizer = DummyVisualizer()
         else:
-            self.visualizer = StatusVisualizer()
+            visual_options = visual_options or {}
+            self.visualizer = StatusVisualizer(**visual_options)
         
         # Initialize all sub-agents
         self.reader = Reader(config_path=config_path)

@@ -1,14 +1,21 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates
-from typing import Dict, Set
+from typing import Dict, Set, Optional, Any, List
 from colorama import Fore, Back, Style, init
 import sys
 import time
 import ast
 from agent.tool.ast import _get_component_name_from_code
+
+
 class StatusVisualizer:
     """Visualizes the workflow status of DocAssist agents in the terminal."""
     
-    def __init__(self):
+    def __init__(
+        self,
+        show_dependency_tree: bool = False,
+        max_tree_depth: int = 2,
+        max_tree_nodes: int = 30
+    ):
         """Initialize the status visualizer."""
         init()  # Initialize colorama
         self.active_agent = None  # Track only the currently active agent
@@ -37,6 +44,11 @@ class StatusVisualizer:
         self._status_message = ""
         self._current_component = ""
         self._current_file = ""
+        self._dependency_components: Optional[Dict[str, Any]] = None
+        self._dependency_root_id: Optional[str] = None
+        self._show_dependency_tree = show_dependency_tree
+        self._max_tree_depth = max_tree_depth
+        self._max_tree_nodes = max_tree_nodes
     
     def _clear_screen(self):
         """Clear the terminal screen."""
@@ -63,12 +75,80 @@ class StatusVisualizer:
         
         self._current_file = file_path
         self._display_component_info()
+
+    def set_dependency_context(self, component_id: str, components: Dict[str, Any]) -> None:
+        """Set the dependency graph context for the currently processed component."""
+        self._dependency_components = components
+        self._dependency_root_id = component_id
     
     def _display_component_info(self):
         """Display information about the current component being processed."""
         # print(f"\n{Fore.CYAN}Currently Processing:{Style.RESET_ALL}")
         print(f"Component: {self._current_component}")
         print(f"File: {self._current_file}\n")
+
+    def _format_component_label(self, component_id: str) -> str:
+        """Format a dependency component label for tree display."""
+        component = None
+        if self._dependency_components:
+            component = self._dependency_components.get(component_id)
+        parts = component_id.split('.')
+        if component and component.component_type == "method" and len(parts) > 2:
+            name = f"{parts[-2]}.{parts[-1]}"
+        else:
+            name = parts[-1] if parts else component_id
+        comp_type = component.component_type.capitalize() if component else "Component"
+        return f"{comp_type} '{name}'"
+
+    def _build_dependency_tree_lines(self) -> List[str]:
+        """Build tree lines for the current component's dependencies."""
+        if not self._show_dependency_tree:
+            return []
+        if not self._dependency_components or not self._dependency_root_id:
+            return []
+
+        lines: List[str] = ["Dependency tree:"]
+        visited: Set[str] = set()
+        node_count = 0
+
+        def walk(node_id: str, prefix: str, depth: int, is_last: bool) -> None:
+            nonlocal node_count
+            if node_count >= self._max_tree_nodes:
+                return
+
+            component = self._dependency_components.get(node_id) if self._dependency_components else None
+            label = self._format_component_label(node_id)
+            if depth == 0:
+                lines.append(label)
+            else:
+                connector = "└─" if is_last else "├─"
+                lines.append(f"{prefix}{connector} {label}")
+            node_count += 1
+
+            if node_id in visited:
+                if depth != 0:
+                    lines[-1] += " (cycle)"
+                return
+            visited.add(node_id)
+
+            if depth >= self._max_tree_depth or not component:
+                return
+
+            deps = sorted(dep_id for dep_id in component.depends_on if dep_id in self._dependency_components)
+            if not deps:
+                return
+
+            next_prefix = prefix + ("   " if is_last else "│  ")
+            for idx, dep_id in enumerate(deps):
+                if node_count >= self._max_tree_nodes:
+                    lines.append(f"{next_prefix}└─ ...")
+                    return
+                walk(dep_id, next_prefix, depth + 1, idx == len(deps) - 1)
+
+        walk(self._dependency_root_id, "", 0, True)
+        if node_count >= self._max_tree_nodes:
+            lines.append(f"... (showing first {self._max_tree_nodes} nodes)")
+        return lines
     
     def update(self, active_agent: str, status_message: str = ""):
         """Update the visualization with the current active agent and status.
@@ -92,6 +172,11 @@ class StatusVisualizer:
         if self._current_component and self._current_file:
             lines.append(f"Processing: {self._current_component}")
             lines.append(f"File: {self._current_file}")
+            lines.append("")
+
+        dependency_lines = self._build_dependency_tree_lines()
+        if dependency_lines:
+            lines.extend(dependency_lines)
             lines.append("")
         
         # Input arrow to Reader
@@ -144,4 +229,4 @@ class StatusVisualizer:
         self._status_message = ""
         self._current_component = ""
         self._current_file = ""
-        self._clear_screen() 
+        self._clear_screen()

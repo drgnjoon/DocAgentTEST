@@ -28,7 +28,7 @@ import argparse
 import logging
 import random
 from pathlib import Path
-from typing import Dict, List, Set, Optional, Any
+from typing import Dict, List, Set, Optional, Any, Tuple
 from collections import defaultdict
 import tiktoken  # Add this import for token counting
 
@@ -44,10 +44,11 @@ logger = logging.getLogger("docstring_generator")
 
 # Import dependency analyzer modules
 from src.dependency_analyzer import (
-    CodeComponent, 
-    DependencyParser, 
-    dependency_first_dfs, 
-    build_graph_from_components
+    CodeComponent,
+    DependencyParser,
+    ClangDependencyParser,
+    dependency_first_dfs,
+    build_graph_from_components,
 )
 from src.visualizer import ProgressVisualizer
 from src.agent.orchestrator import Orchestrator
@@ -114,8 +115,13 @@ def generate_test_docstring(component: CodeComponent) -> str:
         """
 
 
-def generate_docstring_for_component(component: CodeComponent, orchestrator: Optional[Orchestrator], test_mode: str = 'none',
-                                     dependency_graph: Optional[Dict[str, List[str]]] = None) -> str:
+def generate_docstring_for_component(
+    component: CodeComponent,
+    orchestrator: Optional[Orchestrator],
+    test_mode: str = 'none',
+    dependency_graph: Optional[Dict[str, List[str]]] = None,
+    language: str = "python",
+) -> str:
     """
     Generate a docstring for a single component.
     
@@ -147,43 +153,45 @@ def generate_docstring_for_component(component: CodeComponent, orchestrator: Opt
         # truncate the component code to 10000 tokens
         component_code = encoding.decode(encoding.encode(component_code)[:10000])
     
-    # Parse the file
-    with open(file_path, "r", encoding="utf-8") as f:
-        file_content = f.read()
-    
-    ast_tree = ast.parse(file_content)
+    ast_tree = None
     ast_node = None
-    
-    # Locate the AST node for the component
-    component_parts = component.id.split(".")
-    component_name = component_parts[-1]
-    
-    if component.component_type == "function":
-        # Find top-level function
-        for node in ast.iter_child_nodes(ast_tree):
-            if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) 
-                    and node.name == component_name):
-                ast_node = node
-                break
-            
-    elif component.component_type == "class":
-        # Find class
-        for node in ast.iter_child_nodes(ast_tree):
-            if isinstance(node, ast.ClassDef) and node.name == component_name:
-                ast_node = node
-                break
-            
-    elif component.component_type == "method":
-        # Find method inside class
-        class_name, method_name = component_parts[-2:]
-        for node in ast.iter_child_nodes(ast_tree):
-            if isinstance(node, ast.ClassDef) and node.name == class_name:
-                for item in node.body:
-                    if (isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) 
-                            and item.name == method_name):
-                        ast_node = item
-                        break
-                break
+    if language == "python":
+        # Parse the file
+        with open(file_path, "r", encoding="utf-8") as f:
+            file_content = f.read()
+        
+        ast_tree = ast.parse(file_content)
+        
+        # Locate the AST node for the component
+        component_parts = component.id.split(".")
+        component_name = component_parts[-1]
+        
+        if component.component_type == "function":
+            # Find top-level function
+            for node in ast.iter_child_nodes(ast_tree):
+                if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) 
+                        and node.name == component_name):
+                    ast_node = node
+                    break
+                
+        elif component.component_type == "class":
+            # Find class
+            for node in ast.iter_child_nodes(ast_tree):
+                if isinstance(node, ast.ClassDef) and node.name == component_name:
+                    ast_node = node
+                    break
+                
+        elif component.component_type == "method":
+            # Find method inside class
+            class_name, method_name = component_parts[-2:]
+            for node in ast.iter_child_nodes(ast_tree):
+                if isinstance(node, ast.ClassDef) and node.name == class_name:
+                    for item in node.body:
+                        if (isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) 
+                                and item.name == method_name):
+                            ast_node = item
+                            break
+                    break
     
     try:
         # Pass component.id as the focal_node_dependency_path
@@ -279,6 +287,71 @@ def set_docstring_in_file(file_path: str, component: CodeComponent, docstring: s
     with open(file_path, "w", encoding="utf-8") as f:
         f.write(new_source)
     
+    return True
+
+
+def _format_cpp_docstring(docstring: str, indent: str) -> str:
+    import textwrap
+
+    stripped_docstring = docstring.strip('\n')
+    if not stripped_docstring:
+        stripped_docstring = "No docstring provided."
+
+    dedented = textwrap.dedent(stripped_docstring)
+    lines = dedented.splitlines() or ["No docstring provided."]
+    if len(lines) == 1:
+        return f"{indent}/** {lines[0].strip()} */\n"
+
+    comment_lines = [f"{indent}/**"]
+    for line in lines:
+        if line.strip():
+            comment_lines.append(f"{indent} * {line.rstrip()}")
+        else:
+            comment_lines.append(f"{indent} *")
+    comment_lines.append(f"{indent} */")
+    return "\n".join(comment_lines) + "\n"
+
+
+def _find_existing_cpp_doc_comment(lines: List[str], start_line: int) -> Optional[Tuple[int, int]]:
+    from src.dependency_analyzer.clang_parser import _find_doc_comment_range
+
+    return _find_doc_comment_range(lines, start_line)
+
+
+def set_cpp_docstring_in_file(
+    file_path: str,
+    component: CodeComponent,
+    docstring: str,
+    parser: ClangDependencyParser,
+) -> bool:
+    # Do not use Try/Except here, we want to fail if there is an error
+    with open(file_path, "r", encoding="utf-8") as f:
+        lines = f.read().splitlines()
+
+    location = parser.find_component_location(file_path, component.id)
+    if not location:
+        logger.error(f"Could not find component {component.id} in {file_path}")
+        return False
+
+    start_line = location.start_line
+    indent = ""
+    if 0 < start_line <= len(lines):
+        line = lines[start_line - 1]
+        indent = line[:len(line) - len(line.lstrip())]
+
+    comment_range = _find_existing_cpp_doc_comment(lines, start_line)
+    insert_at = start_line - 1
+    if comment_range:
+        comment_start, comment_end = comment_range
+        del lines[comment_start:comment_end + 1]
+        insert_at = comment_start
+
+    comment_block = _format_cpp_docstring(docstring, indent)
+    comment_lines = comment_block.rstrip("\n").splitlines()
+    lines[insert_at:insert_at] = comment_lines
+
+    with open(file_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
     return True
 
 
@@ -408,6 +481,13 @@ def main():
         action='store_true',
         help='Overwrite existing docstrings instead of skipping them (default: False)'
     )
+    parser.add_argument(
+        '--language',
+        type=str,
+        choices=['python', 'c', 'cpp', 'c++'],
+        default='python',
+        help='Language to document: python (default), c, cpp/c++'
+    )
     
     args = parser.parse_args()
     repo_path = args.repo_path
@@ -415,6 +495,9 @@ def main():
     test_mode = args.test_mode
     order_mode = args.order_mode
     overwrite_docstrings = args.overwrite_docstrings
+    language = args.language
+    if language == "c++":
+        language = "cpp"
     
     # Create output directory for dependency graph
     output_dir = os.path.join("output", "dependency_graphs")
@@ -434,7 +517,12 @@ def main():
         logger.info(f"Initializing orchestrator with config: {config_path}")
         # Pass the test_mode to the orchestrator if it's "context_print"
         orchestrator_test_mode = test_mode if test_mode != 'none' else None
-        orchestrator = Orchestrator(repo_path=repo_path, config_path=config_path, test_mode=orchestrator_test_mode)
+        orchestrator = Orchestrator(
+            repo_path=repo_path,
+            config_path=config_path,
+            test_mode=orchestrator_test_mode,
+            language=language,
+        )
         
         # Check if the overwrite_docstrings option is in the config file
         # If it's there, it overrides the command-line argument
@@ -449,7 +537,10 @@ def main():
     
     # Parse the repository to build the dependency graph
     logger.info(f"Parsing repository: {repo_path}")
-    parser = DependencyParser(repo_path)
+    if language == "python":
+        parser = DependencyParser(repo_path)
+    else:
+        parser = ClangDependencyParser(repo_path, language=language)
     components = parser.parse_repository()
     
     # Save the dependency graph for future reference
@@ -546,11 +637,20 @@ def main():
         
         # Generate the docstring
         logger.info(f"Generating docstring for {component_id}")
-        docstring = generate_docstring_for_component(component, orchestrator, test_mode, dependency_graph)
+        docstring = generate_docstring_for_component(
+            component,
+            orchestrator,
+            test_mode,
+            dependency_graph,
+            language=language,
+        )
         
         # Update the file with the new docstring
         file_path = component.file_path
-        success = set_docstring_in_file(file_path, component, docstring)
+        if language == "python":
+            success = set_docstring_in_file(file_path, component, docstring)
+        else:
+            success = set_cpp_docstring_in_file(file_path, component, docstring, parser)
         
         if success:
             logger.info(f"Successfully updated docstring for {component_id}")
@@ -566,7 +666,7 @@ def main():
             if comp_id != component_id and components[comp_id].file_path == file_path
         ]
         
-        if same_file_components:
+        if same_file_components and language == "python":
             logger.info(f"Re-parsing file {file_path} for updated line numbers")
             parser = DependencyParser(repo_path)
             updated_components = parser.parse_repository()

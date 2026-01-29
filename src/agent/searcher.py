@@ -34,16 +34,18 @@ class ParsedInfoRequest:
 class Searcher(BaseAgent):
     """Agent responsible for gathering requested information from internal and external sources."""
     
-    def __init__(self, repo_path: str, config_path: Optional[str] = None):
+    def __init__(self, repo_path: str, config_path: Optional[str] = None, language: str = "python"):
         """Initialize the Searcher agent.
         
         Args:
             repo_path: Path to the repository being analyzed
             config_path: Optional path to the configuration file
+            language: Language of the repository (default: python)
         """
         super().__init__("Searcher", config_path=config_path)
         self.repo_path = repo_path
-        self.ast_analyzer = ASTNodeAnalyzer(repo_path)
+        self.language = language
+        self.ast_analyzer = ASTNodeAnalyzer(repo_path) if language == "python" else None
 
     def process(
         self, 
@@ -80,6 +82,17 @@ class Searcher(BaseAgent):
                 }
             }
         """
+        if self.language != "python":
+            external_info = self._gather_external_info(
+                self._parse_reader_response(reader_response).external_requests
+            )
+            return {
+                'internal': {
+                    'calls': {'class': {}, 'function': {}, 'method': {}},
+                    'called_by': []
+                },
+                'external': external_info
+            }
         # Parse the reader's response into structured format
         parsed_request = self._parse_reader_response(reader_response)
 

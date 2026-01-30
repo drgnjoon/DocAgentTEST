@@ -29,6 +29,7 @@ else:
 
 C_EXTENSIONS = {".c", ".h"}
 CPP_EXTENSIONS = {".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx", ".ipp"}
+HEADER_EXTENSIONS = {".h", ".hpp", ".hh", ".hxx", ".ipp"}
 
 
 @dataclass(frozen=True)
@@ -70,6 +71,10 @@ def _is_c_cpp_file(filename: str, language: str) -> bool:
     if language == "c":
         return ext in C_EXTENSIONS
     return ext in C_EXTENSIONS | CPP_EXTENSIONS
+
+
+def _language_for_header(language: str) -> List[str]:
+    return ["-x", "c++"] if language == "cpp" else ["-x", "c"]
 
 
 def _cursor_in_file(cursor: cindex.Cursor, file_path: str) -> bool:
@@ -324,6 +329,10 @@ class ClangDependencyParser:
     def _get_parse_args(self, file_path: str) -> List[str]:
         args = list(self.base_args)
         args.extend(self._compile_db_args(file_path))
+        if not any(arg == "-x" for arg in args):
+            _, ext = os.path.splitext(file_path)
+            if ext.lower() in HEADER_EXTENSIONS:
+                args.extend(_language_for_header(self.language))
         args.extend(f"-I{path}" for path in self.include_dirs)
         args.extend(f"-D{definition}" for definition in self.defines)
         return args

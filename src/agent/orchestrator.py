@@ -31,18 +31,26 @@ class DummyVisualizer:
 class Orchestrator(BaseAgent):
     """Agent responsible for managing the workflow between all other agents."""
     
-    def __init__(self, repo_path: str, config_path: Optional[str] = None, test_mode: Optional[str] = None):
+    def __init__(
+        self,
+        repo_path: str,
+        config_path: Optional[str] = None,
+        test_mode: Optional[str] = None,
+        language: str = "python",
+    ):
         """Initialize the Orchestrator agent and its sub-agents.
         
         Args:
             repo_path: Path to the repository being analyzed
             config_path: Optional path to the configuration file
             test_mode: Optional test mode to run only specific components. Values: "reader_searcher", "context_print" or None
+            language: Language of the repository (default: python)
         """
         super().__init__("Orchestrator")
         self.repo_path = repo_path
         self.context = ""
         self.test_mode = test_mode
+        self.language = language
         
         # Load configuration
         self.config = {}
@@ -72,7 +80,7 @@ class Orchestrator(BaseAgent):
         
         # Initialize all sub-agents
         self.reader = Reader(config_path=config_path)
-        self.searcher = Searcher(repo_path, config_path=config_path)
+        self.searcher = Searcher(repo_path, config_path=config_path, language=language)
         
         # Only initialize writer and verifier if not in reader_searcher test mode
         if test_mode != "reader_searcher":

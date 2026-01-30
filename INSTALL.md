@@ -43,6 +43,34 @@ sudo yum install graphviz graphviz-devel
 brew install graphviz
 ```
 
+### libclang (C/C++ Parsing) Dependencies
+
+If you plan to document C/C++ repositories, you must install the system `libclang`
+library and the Python `clang` bindings inside your virtual environment. The
+Python package alone is not sufficient because it depends on the native library.
+
+**Install the system library:**
+
+```bash
+# Ubuntu/Debian
+sudo apt-get install clang libclang-dev
+
+# CentOS/RHEL
+sudo yum install clang libclang-devel
+
+# macOS (Homebrew)
+brew install llvm
+```
+
+**Install the Python bindings in your venv:**
+
+```bash
+pip install clang
+```
+
+If libclang is not automatically discovered, set `LIBCLANG_PATH` to the directory
+that contains the `libclang` shared library.
+
 ### CUDA Support
 
-If you're using CUDA for accelerated processing, ensure you have the correct CUDA toolkit installed that matches your PyTorch version. 
+If you're using CUDA for accelerated processing, ensure you have the correct CUDA toolkit installed that matches your PyTorch version.

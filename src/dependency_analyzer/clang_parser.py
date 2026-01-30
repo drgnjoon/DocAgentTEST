@@ -12,7 +12,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .ast_parser import CodeComponent
 
@@ -179,11 +179,33 @@ def _extract_doc_comment(lines: List[str], start_line: int) -> str:
     return "\n".join(cleaned).strip()
 
 
+def _resolve_compile_commands_dir(compile_commands_path: Optional[str]) -> Optional[str]:
+    if not compile_commands_path:
+        return None
+    path = os.path.abspath(compile_commands_path)
+    if os.path.isdir(path):
+        return path
+    if os.path.isfile(path) and os.path.basename(path) == "compile_commands.json":
+        return os.path.dirname(path)
+    return None
+
+
+def _load_compilation_database(directory: Optional[str]) -> Optional["cindex.CompilationDatabase"]:
+    if not directory or cindex is None:
+        return None
+    if not hasattr(cindex, "CompilationDatabase"):
+        logger.warning("libclang bindings do not expose CompilationDatabase; compile_commands.json ignored.")
+        return None
+    try:
+        return cindex.CompilationDatabase.fromDirectory(directory)
+    except cindex.CompilationDatabaseError as exc:
+        logger.warning(f"Failed to load compilation database from {directory}: {exc}")
+        return None
+
+
 class ClangDependencyParser:
     """
     Parses C/C++ code to build a dependency graph between code components.
-
-    Currently, dependency relationships are not extracted for C/C++.
     """
 
     def __init__(
@@ -191,12 +213,21 @@ class ClangDependencyParser:
         repo_path: str,
         language: str = "cpp",
         clang_args: Optional[Sequence[str]] = None,
+        include_dirs: Optional[Sequence[str]] = None,
+        defines: Optional[Sequence[str]] = None,
+        compile_commands_path: Optional[str] = None,
     ) -> None:
         _ensure_clang_available()
         self.repo_path = os.path.abspath(repo_path)
         self.language = "c" if language == "c" else "cpp"
-        self.clang_args = _get_clang_args(self.language, clang_args)
+        self.base_args = _get_clang_args(self.language, clang_args)
+        self.include_dirs = list(include_dirs or [])
+        self.defines = list(defines or [])
+        self.compile_commands_dir = _resolve_compile_commands_dir(compile_commands_path)
+        self.compilation_db = _load_compilation_database(self.compile_commands_dir)
         self.components: Dict[str, CodeComponent] = {}
+        self._component_cursors: Dict[str, cindex.Cursor] = {}
+        self._usr_to_component_id: Dict[str, str] = {}
         self.modules: set[str] = set()
         self.index = cindex.Index.create()
 
@@ -211,14 +242,16 @@ class ClangDependencyParser:
                 module_path = _file_to_module_path(relative_path)
                 self.modules.add(module_path)
                 self._parse_file(file_path, relative_path)
+        self._build_dependencies()
         logger.info(f"Found {len(self.components)} C/C++ code components")
         return self.components
 
     def _parse_file(self, file_path: str, relative_path: str) -> None:
         try:
+            parse_args = self._get_parse_args(file_path)
             translation_unit = self.index.parse(
                 file_path,
-                args=self.clang_args,
+                args=parse_args,
                 options=cindex.TranslationUnit.PARSE_DETAILED_PROCESSING_RECORD,
             )
         except cindex.TranslationUnitLoadError as exc:
@@ -244,6 +277,7 @@ class ClangDependencyParser:
 
             extent = cursor.extent
             component_id = build_component_id(file_path, relative_path, cursor)
+            usr = cursor.get_usr()
             docstring = _extract_doc_comment(lines, extent.start.line)
 
             component = CodeComponent(
@@ -266,6 +300,9 @@ class ClangDependencyParser:
                 docstring=docstring,
             )
             self.components[component_id] = component
+            if usr:
+                self._usr_to_component_id[usr] = component_id
+                self._component_cursors[component_id] = cursor
 
     def _cursor_component_type(self, cursor: cindex.Cursor) -> Optional[str]:
         if cursor.kind in {cindex.CursorKind.FUNCTION_DECL, cindex.CursorKind.FUNCTION_TEMPLATE}:
@@ -283,6 +320,64 @@ class ClangDependencyParser:
         }:
             return "class"
         return None
+
+    def _get_parse_args(self, file_path: str) -> List[str]:
+        args = list(self.base_args)
+        args.extend(self._compile_db_args(file_path))
+        args.extend(f"-I{path}" for path in self.include_dirs)
+        args.extend(f"-D{definition}" for definition in self.defines)
+        return args
+
+    def _compile_db_args(self, file_path: str) -> List[str]:
+        if not self.compilation_db:
+            return []
+        try:
+            commands = self.compilation_db.getCompileCommands(file_path)
+        except cindex.CompilationDatabaseError as exc:
+            logger.warning(f"Error reading compile commands for {file_path}: {exc}")
+            return []
+        if not commands:
+            return []
+        command = commands[0]
+        args: List[str] = []
+        skip_next = False
+        for arg in command.arguments:
+            if skip_next:
+                skip_next = False
+                continue
+            if arg in {"-c", command.filename}:
+                continue
+            if arg == "-o":
+                skip_next = True
+                continue
+            if arg.startswith("-o"):
+                continue
+            args.append(arg)
+        return args
+
+    def _build_dependencies(self) -> None:
+        if not self._component_cursors:
+            return
+        for component_id, cursor in self._component_cursors.items():
+            depends_on = self._collect_dependencies(cursor)
+            self.components[component_id].depends_on = depends_on
+
+    def _collect_dependencies(self, cursor: cindex.Cursor) -> set[str]:
+        dependencies: set[str] = set()
+        for child in cursor.walk_preorder():
+            referenced = child.referenced
+            if referenced is None:
+                continue
+            usr = referenced.get_usr()
+            if not usr:
+                continue
+            target_id = self._usr_to_component_id.get(usr)
+            if not target_id:
+                continue
+            if target_id == self._usr_to_component_id.get(cursor.get_usr(), ""):
+                continue
+            dependencies.add(target_id)
+        return dependencies
 
     def save_dependency_graph(self, output_path: str) -> None:
         serializable_components = {
@@ -307,9 +402,10 @@ class ClangDependencyParser:
     def find_component_location(self, file_path: str, component_id: str) -> Optional[ComponentLocation]:
         relative_path = os.path.relpath(file_path, self.repo_path)
         try:
+            parse_args = self._get_parse_args(file_path)
             translation_unit = self.index.parse(
                 file_path,
-                args=self.clang_args,
+                args=parse_args,
                 options=cindex.TranslationUnit.PARSE_DETAILED_PROCESSING_RECORD,
             )
         except cindex.TranslationUnitLoadError as exc:

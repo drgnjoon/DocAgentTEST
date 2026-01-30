@@ -488,6 +488,30 @@ def main():
         default='python',
         help='Language to document: python (default), c, cpp/c++'
     )
+    parser.add_argument(
+        '--compile-commands',
+        type=str,
+        default=None,
+        help='Path to compile_commands.json or its directory for C/C++ parsing'
+    )
+    parser.add_argument(
+        '--clang-arg',
+        action='append',
+        default=[],
+        help='Additional clang argument to pass to libclang (repeatable)'
+    )
+    parser.add_argument(
+        '--include-dir',
+        action='append',
+        default=[],
+        help='Additional include directory to pass as -I (repeatable)'
+    )
+    parser.add_argument(
+        '--define',
+        action='append',
+        default=[],
+        help='Additional preprocessor definition to pass as -D (repeatable)'
+    )
     
     args = parser.parse_args()
     repo_path = args.repo_path
@@ -498,6 +522,10 @@ def main():
     language = args.language
     if language == "c++":
         language = "cpp"
+    clang_args = args.clang_arg
+    include_dirs = args.include_dir
+    defines = args.define
+    compile_commands = args.compile_commands
     
     # Create output directory for dependency graph
     output_dir = os.path.join("output", "dependency_graphs")
@@ -540,7 +568,14 @@ def main():
     if language == "python":
         parser = DependencyParser(repo_path)
     else:
-        parser = ClangDependencyParser(repo_path, language=language)
+        parser = ClangDependencyParser(
+            repo_path,
+            language=language,
+            clang_args=clang_args,
+            include_dirs=include_dirs,
+            defines=defines,
+            compile_commands_path=compile_commands,
+        )
     components = parser.parse_repository()
     
     # Save the dependency graph for future reference
